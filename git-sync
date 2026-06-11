@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEVICE_NAME="Arch"
+BRANCH=""
+
+GREEN=$(tput setaf 2)
+YELLOW=$(tput setaf 3)
+RED=$(tput setaf 1)
+CYAN=$(tput setaf 6)
+RESET=$(tput sgr0)
+
+info()  { echo "${CYAN}i${RESET} $1"; }
+ok()    { echo "${GREEN}*${RESET} $1"; }
+warn()  { echo "${YELLOW}!${RESET} $1"; }
+error() { echo "${RED}x${RESET} $1"; }
+
+if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    error "Not a git repository"
+    exit 1
+fi
+
+if [ -z "$BRANCH" ]; then
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+fi
+
+REMOTE=$(git config "branch.$BRANCH.remote" || true)
+if [ -z "$REMOTE" ]; then
+    error "No remote configured for branch '$BRANCH'. Run: git push -u origin $BRANCH"
+    exit 1
+fi
+
+UPSTREAM="${REMOTE}/${BRANCH}"
+
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
+COMMIT_MSG="Last Sync: $TIMESTAMP ($DEVICE_NAME)"
+
+if git diff --quiet && git diff --cached --quiet; then
+    info "No changes to commit"
+else
+    git add -A
+    git commit -m "$COMMIT_MSG"
+    ok "Committed: $COMMIT_MSG"
+fi
+
+info "Fetching from $REMOTE..."
+if ! git fetch "$REMOTE" 2>&1; then
+    error "Fetch failed"
+    exit 1
+fi
+ok "Fetch complete"
+
+AHEAD=$(git rev-list --count "$UPSTREAM..HEAD" 2>/dev/null || echo 0)
+BEHIND=$(git rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)
+
+if [ "$AHEAD" -eq 0 ] && [ "$BEHIND" -eq 0 ]; then
+    ok "Everything is in sync"
+    exit 0
+fi
+
+if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
+    STATE="diverged"
+    info "Local is ${AHEAD} ahead, remote is ${BEHIND} ahead ${YELLOW}(diverged)${RESET}"
+elif [ "$AHEAD" -gt 0 ]; then
+    STATE="ahead"
+    info "Local is ${AHEAD} commit(s) ahead of remote"
+else
+    STATE="behind"
+    info "Remote is ${BEHIND} commit(s) ahead of local"
+fi
+
+echo
+echo "What would you like to do?"
+case "$STATE" in
+    ahead)
+        echo "  [u] Upload changes (push)"
+        echo "  [U] Upload + overwrite remote (force push)"
+        echo "  [c] Cancel"
+        ;;
+    behind)
+        echo "  [d] Download changes (pull --rebase)"
+        echo "  [D] Download + overwrite local (reset to $UPSTREAM)"
+        echo "  [c] Cancel"
+        ;;
+    diverged)
+        echo "  [u] Upload changes (push)"
+        echo "  [U] Upload + overwrite remote (force push)"
+        echo "  [d] Download changes (pull --rebase)"
+        echo "  [D] Download + overwrite local (reset to $UPSTREAM)"
+        echo "  [c] Cancel"
+        ;;
+esac
+echo -n "Choice: "
+read -r choice
+
+case "$choice" in
+    u)
+        echo
+        git push "$REMOTE" "$BRANCH"
+        ok "Push complete"
+        ;;
+    U)
+        echo
+        warn "This will DISCARD remote commits that aren't local."
+        echo -n "Type 'yes' to force push: "
+        read -r confirm
+        if [ "$confirm" != "yes" ]; then
+            info "Cancelled"
+            exit 0
+        fi
+        git push --force "$REMOTE" "$BRANCH"
+        ok "Force push complete"
+        ;;
+    d)
+        echo
+        git pull --rebase "$REMOTE" "$BRANCH"
+        ok "Pull complete"
+        ;;
+    D)
+        echo
+        warn "This will DISCARD local changes that aren't in the remote."
+        echo -n "Type 'yes' to reset: "
+        read -r confirm
+        if [ "$confirm" != "yes" ]; then
+            info "Cancelled"
+            exit 0
+        fi
+        git reset --hard "$UPSTREAM"
+        ok "Reset to $UPSTREAM complete"
+        ;;
+    c)
+        info "Cancelled"
+        exit 0
+        ;;
+    *)
+        error "Invalid choice"
+        exit 1
+        ;;
+esac
