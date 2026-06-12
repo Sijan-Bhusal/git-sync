@@ -105,18 +105,21 @@ case "$STATE" in
   ahead)
     choice=$(choose_action \
       "Upload changes (push)" \
+      "Sync (pull + push)" \
       "Upload + overwrite remote (force push)" \
       "Cancel")
     ;;
   behind)
     choice=$(choose_action \
       "Download changes (pull --rebase)" \
+      "Sync (pull + push)" \
       "Download + overwrite local (reset)" \
       "Cancel")
     ;;
   diverged)
     choice=$(choose_action \
       "Upload changes (push)" \
+      "Sync (pull + push)" \
       "Upload + overwrite remote (force push)" \
       "Download changes (pull --rebase)" \
       "Download + overwrite local (reset)" \
@@ -133,6 +136,12 @@ case "$choice" in
   "Upload changes (push)")
     spin "Pushing to $REMOTE/$BRANCH..." git push "$REMOTE" "$BRANCH"
     ok "Push complete"
+    ;;
+
+  "Sync (pull + push)")
+    spin "Pulling from $REMOTE/$BRANCH..." git pull --rebase "$REMOTE" "$BRANCH"
+    spin "Pushing to $REMOTE/$BRANCH..." git push "$REMOTE" "$BRANCH"
+    ok "Sync complete"
     ;;
 
   "Upload + overwrite remote (force push)")
