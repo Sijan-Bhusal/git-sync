@@ -4,136 +4,171 @@ set -euo pipefail
 DEVICE_NAME="Arch"
 BRANCH=""
 
-GREEN=$(tput setaf 2)
-YELLOW=$(tput setaf 3)
-RED=$(tput setaf 1)
-CYAN=$(tput setaf 6)
-RESET=$(tput sgr0)
+# ──────────────────────────────────────────────
+#  gum-based UI helpers
+# ──────────────────────────────────────────────
+header() {
+  gum style --border double --padding "1 2" --margin "0 0 1 0" \
+    --foreground 212 --border-foreground 212 \
+    "📓 Git Sync" "Device: $DEVICE_NAME"
+}
 
-info()  { echo "${CYAN}i${RESET} $1"; }
-ok()    { echo "${GREEN}*${RESET} $1"; }
-warn()  { echo "${YELLOW}!${RESET} $1"; }
-error() { echo "${RED}x${RESET} $1"; }
+info()   { gum style --foreground 39 "▸ $1"; }
+ok()     { gum style --foreground 42 "✔ $1"; }
+warn()   { gum style --foreground 214 "⚠ $1"; }
+error()  { gum style --foreground 196 "✖ $1"; }
+fatal()  { error "$1"; exit 1; }
 
-if ! git rev-parse --git-dir > /dev/null 2>&1; then
-    error "Not a git repository"
-    exit 1
-fi
+spin() {
+  gum spin --spinner dot --title "$1" --show-error -- "${@:2}"
+}
 
-if [ -z "$BRANCH" ]; then
-    BRANCH=$(git rev-parse --abbrev-ref HEAD)
-fi
+confirm_danger() {
+  gum confirm --affirmative "Yes, $1" --negative "Cancel" --default=false \
+    "$2"
+}
+
+# ──────────────────────────────────────────────
+#  Guard: must be a git repo
+# ──────────────────────────────────────────────
+git rev-parse --git-dir > /dev/null 2>&1 || fatal "Not a git repository"
+
+# ──────────────────────────────────────────────
+#  Determine branch & remote
+# ──────────────────────────────────────────────
+[ -z "$BRANCH" ] && BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 REMOTE=$(git config "branch.$BRANCH.remote" || true)
-if [ -z "$REMOTE" ]; then
-    error "No remote configured for branch '$BRANCH'. Run: git push -u origin $BRANCH"
-    exit 1
-fi
+[ -z "$REMOTE" ] && fatal "No remote configured for branch '$BRANCH'. Run: git push -u origin $BRANCH"
 
 UPSTREAM="${REMOTE}/${BRANCH}"
-
-TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
+TIMESTAMP=$(date '+%b-%d')
 COMMIT_MSG="Last Sync: $TIMESTAMP ($DEVICE_NAME)"
 
+# ──────────────────────────────────────────────
+#  Render header
+# ──────────────────────────────────────────────
+header
+
+# ──────────────────────────────────────────────
+#  Commit pending changes
+# ──────────────────────────────────────────────
 if git diff --quiet && git diff --cached --quiet; then
-    info "No changes to commit"
+  info "No changes to commit"
 else
-    git add -A
-    git commit -m "$COMMIT_MSG"
-    ok "Committed: $COMMIT_MSG"
+  git add -A
+  git commit -m "$COMMIT_MSG"
+  ok "Committed: $COMMIT_MSG"
 fi
 
+# ──────────────────────────────────────────────
+#  Fetch
+# ──────────────────────────────────────────────
 info "Fetching from $REMOTE..."
-if ! git fetch "$REMOTE" 2>&1; then
-    error "Fetch failed"
-    exit 1
-fi
+spin "Fetching from $REMOTE..." git fetch "$REMOTE" || fatal "Fetch failed"
 ok "Fetch complete"
 
+# ──────────────────────────────────────────────
+#  Determine sync state
+# ──────────────────────────────────────────────
 AHEAD=$(git rev-list --count "$UPSTREAM..HEAD" 2>/dev/null || echo 0)
 BEHIND=$(git rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)
 
 if [ "$AHEAD" -eq 0 ] && [ "$BEHIND" -eq 0 ]; then
-    ok "Everything is in sync"
-    exit 0
+  ok "Everything is in sync"
+  exit 0
 fi
 
 if [ "$AHEAD" -gt 0 ] && [ "$BEHIND" -gt 0 ]; then
-    STATE="diverged"
-    info "Local is ${AHEAD} ahead, remote is ${BEHIND} ahead ${YELLOW}(diverged)${RESET}"
+  STATE="diverged"
+  info "Local is ${AHEAD} ahead, remote is ${BEHIND} behind"
+  warn "Branch has diverged"
 elif [ "$AHEAD" -gt 0 ]; then
-    STATE="ahead"
-    info "Local is ${AHEAD} commit(s) ahead of remote"
+  STATE="ahead"
+  info "Local is ${AHEAD} commit(s) ahead of remote"
 else
-    STATE="behind"
-    info "Remote is ${BEHIND} commit(s) ahead of local"
+  STATE="behind"
+  info "Remote is ${BEHIND} commit(s) ahead of local"
 fi
 
+# ──────────────────────────────────────────────
+#  Action menu
+# ──────────────────────────────────────────────
 echo
-echo "What would you like to do?"
+
+choose_action() {
+  gum choose --cursor "→ " --header "What would you like to do?" --height 10 \
+    "$@"
+}
+
 case "$STATE" in
-    ahead)
-        echo "  [u] Upload changes (push)"
-        echo "  [U] Upload + overwrite remote (force push)"
-        echo "  [c] Cancel"
-        ;;
-    behind)
-        echo "  [d] Download changes (pull --rebase)"
-        echo "  [D] Download + overwrite local (reset to $UPSTREAM)"
-        echo "  [c] Cancel"
-        ;;
-    diverged)
-        echo "  [u] Upload changes (push)"
-        echo "  [U] Upload + overwrite remote (force push)"
-        echo "  [d] Download changes (pull --rebase)"
-        echo "  [D] Download + overwrite local (reset to $UPSTREAM)"
-        echo "  [c] Cancel"
-        ;;
+  ahead)
+    choice=$(choose_action \
+      "Upload changes (push)" \
+      "Upload + overwrite remote (force push)" \
+      "Cancel")
+    ;;
+  behind)
+    choice=$(choose_action \
+      "Download changes (pull --rebase)" \
+      "Download + overwrite local (reset)" \
+      "Cancel")
+    ;;
+  diverged)
+    choice=$(choose_action \
+      "Upload changes (push)" \
+      "Upload + overwrite remote (force push)" \
+      "Download changes (pull --rebase)" \
+      "Download + overwrite local (reset)" \
+      "Cancel")
+    ;;
 esac
-echo -n "Choice: "
-read -r choice
+
+# ──────────────────────────────────────────────
+#  Execute action
+# ──────────────────────────────────────────────
+echo
 
 case "$choice" in
-    u)
-        echo
-        git push "$REMOTE" "$BRANCH"
-        ok "Push complete"
-        ;;
-    U)
-        echo
-        warn "This will DISCARD remote commits that aren't local."
-        echo -n "Type 'yes' to force push: "
-        read -r confirm
-        if [ "$confirm" != "yes" ]; then
-            info "Cancelled"
-            exit 0
-        fi
-        git push --force "$REMOTE" "$BRANCH"
-        ok "Force push complete"
-        ;;
-    d)
-        echo
-        git pull --rebase "$REMOTE" "$BRANCH"
-        ok "Pull complete"
-        ;;
-    D)
-        echo
-        warn "This will DISCARD local changes that aren't in the remote."
-        echo -n "Type 'yes' to reset: "
-        read -r confirm
-        if [ "$confirm" != "yes" ]; then
-            info "Cancelled"
-            exit 0
-        fi
-        git reset --hard "$UPSTREAM"
-        ok "Reset to $UPSTREAM complete"
-        ;;
-    c)
-        info "Cancelled"
-        exit 0
-        ;;
-    *)
-        error "Invalid choice"
-        exit 1
-        ;;
+  "Upload changes (push)")
+    spin "Pushing to $REMOTE/$BRANCH..." git push "$REMOTE" "$BRANCH"
+    ok "Push complete"
+    ;;
+
+  "Upload + overwrite remote (force push)")
+    warn "This will DISCARD remote commits that aren't local."
+    if confirm_danger "force push" "Proceed with force push?"; then
+      spin "Force pushing to $REMOTE/$BRANCH..." git push --force "$REMOTE" "$BRANCH"
+      ok "Force push complete"
+    else
+      info "Cancelled"
+      exit 0
+    fi
+    ;;
+
+  "Download changes (pull --rebase)")
+    spin "Pulling from $REMOTE/$BRANCH..." git pull --rebase "$REMOTE" "$BRANCH"
+    ok "Pull complete"
+    ;;
+
+  "Download + overwrite local (reset)")
+    warn "This will DISCARD local changes that aren't in the remote."
+    if confirm_danger "reset" "Reset local to $UPSTREAM?"; then
+      git reset --hard "$UPSTREAM"
+      ok "Reset to $UPSTREAM complete"
+    else
+      info "Cancelled"
+      exit 0
+    fi
+    ;;
+
+  ""|"Cancel")
+    info "Cancelled"
+    exit 0
+    ;;
+
+  *)
+    error "Invalid choice"
+    exit 1
+    ;;
 esac
